@@ -2,8 +2,8 @@
 FROM ghcr.io/ayastrebov/docker-amneziawg:latest
 
 # Устанавливаем Python и зависимости для панели
-RUN echo "http://dl-cdn.alpinelinux.org/alpine/v3.19/community" >> /etc/apk/repositories \
-    && apk add --no-cache python3 py3-pip qrencode curl \
+RUN apk add --no-cache python3 qrencode curl \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python3 \
     && pip3 install --no-cache --upgrade pip setuptools --break-system-packages
 
 # Устанавливаем Flask
