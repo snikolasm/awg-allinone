@@ -2,7 +2,9 @@
 FROM ghcr.io/ayastrebov/docker-amneziawg:latest
 
 # Устанавливаем Python и зависимости для панели
-RUN apk add --no-cache python3 py3-pip qrencode curl
+RUN apk add --no-cache python3 qrencode curl \
+    && python3 -m ensurepip \
+    && pip3 install --no-cache --upgrade pip setuptools
 
 # Устанавливаем Flask
 RUN pip3 install flask --break-system-packages
