@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import os
 import re
 import sqlite3
@@ -8,6 +5,7 @@ import subprocess
 import threading
 import time
 import ipaddress
+import secrets
 from datetime import datetime, timedelta
 from functools import wraps
 
@@ -29,114 +27,7 @@ app = Flask(__name__)
 os.makedirs(CONFIGS_DIR, exist_ok=True)
 os.makedirs(QR_DIR, exist_ok=True)
 
-# ==================== Работа с серверным конфигом ====================
-def get_server_config():
-    if not os.path.exists(SERVER_CONF):
-        raise RuntimeError(f"Файл {SERVER_CONF} не найден.")
-
-    with open(SERVER_CONF, "r") as f:
-        content = f.read()
-
-    m_priv = re.search(r"^PrivateKey\s*=\s*(\S+)", content, re.MULTILINE)
-    if not m_priv:
-        raise RuntimeError("В конфиге сервера не найден PrivateKey")
-    priv = m_priv.group(1)
-    srv_pub = subprocess.run(["awg", "pubkey"], input=priv, capture_output=True, text=True).stdout.strip()
-
-    m_port = re.search(r"^ListenPort\s*=\s*(\d+)", content, re.MULTILINE)
-    port = m_port.group(1) if m_port else "51820"
-
-    m_addr = re.search(r"^Address\s*=\s*(\S+)", content, re.MULTILINE)
-    if not m_addr:
-        raise RuntimeError("В конфиге сервера не найден Address")
-    
-    server_ip_str = m_addr.group(1).split('/')[0]
-    server_ip = ipaddress.ip_address(server_ip_str)
-    network = ipaddress.ip_network(f"{server_ip_str}/24", strict=False)
-
-    m_mtu = re.search(r"^MTU\s*=\s*(\d+)", content, re.MULTILINE)
-    mtu = m_mtu.group(1) if m_mtu else DEFAULT_MTU
-
-    m_keepalive = re.search(r"^PersistentKeepalive\s*=\s*(\d+)", content, re.MULTILINE)
-    keepalive = m_keepalive.group(1) if m_keepalive else DEFAULT_KEEPALIVE
-
-    obfuscation = {}
-    for param in ["Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4"]:
-        m = re.search(rf"^{param}\s*=\s*(\d+)", content, re.MULTILINE)
-        if m:
-            obfuscation[param] = m.group(1)
-
-    return {
-        "pub_key": srv_pub, "port": port, "network": network,
-        "server_ip": server_ip, "mtu": mtu, "keepalive": keepalive,
-        "obfuscation": obfuscation
-    }
-
-def append_peer_to_conf(pub_key, allowed_ip):
-    """Дописывает пира в конец файла серверного конфига"""
-    peer_block = f"""
-[Peer]
-PublicKey = {pub_key}
-AllowedIPs = {allowed_ip}/32
-"""
-    with open(SERVER_CONF, "a") as f:
-        f.write(peer_block)
-
-def remove_peer_from_conf(pub_key):
-    """Удаляет блок пира из серверного конфига по его публичному ключу"""
-    if not os.path.exists(SERVER_CONF):
-        return
-    with open(SERVER_CONF, "r") as f:
-        content = f.read()
-
-    # Регулярное выражение для поиска блока [Peer] с нужным ключом
-    # Ищем от [Peer] до следующего [Peer] или до конца файла
-    pattern = re.compile(
-        rf"\[Peer\]\s*\n(?:.*\n)*?PublicKey\s*=\s*{re.escape(pub_key)}\s*\n(?:.*\n)*?(?=\[Peer\]|\Z)",
-        re.MULTILINE
-    )
-    
-    new_content = pattern.sub("", content)
-    
-    # Убираем лишние пустые строки в конце
-    new_content = re.sub(r'\n{3,}', '\n\n', new_content).strip() + "\n"
-    
-    with open(SERVER_CONF, "w") as f:
-        f.write(new_content)
-
-# ==================== Определение IP ====================
-def get_public_ip():
-    try:
-        route_out = subprocess.check_output(["ip", "route", "get", "8.8.8.8"], text=True)
-        match = re.search(r"dev\s+(\w+)", route_out)
-        if match:
-            dev = match.group(1)
-            addr_out = subprocess.check_output(["ip", "-4", "addr", "show", dev], text=True)
-            ip_match = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", addr_out)
-            if ip_match:
-                return ip_match.group(1)
-    except Exception:
-        pass
-    return "ВАШ_IP_НЕ_ОПРЕДЕЛЕН"
-
-SERVER_IP = os.environ.get("AWG_SERVER_IP", get_public_ip())
-print(f"[*] Панель использует IP для Endpoint: {SERVER_IP}")
-
-# ==================== БД и Утилиты ====================
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS clients (
-            name TEXT PRIMARY KEY,
-            pub_key TEXT NOT NULL,
-            ip TEXT NOT NULL,
-            expire_at TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
-
+# ==================== Утилиты ====================
 def check_auth(username, password):
     return username == AUTH_USER and password == AUTH_PASS
 
@@ -163,25 +54,46 @@ def gen_keypair():
     pub = run_cmd(["awg", "pubkey"], input_data=priv).strip()
     return priv, pub
 
-def next_client_ip(network, server_ip):
-    conn = sqlite3.connect(DB_PATH)
-    rows = conn.execute("SELECT ip FROM clients").fetchall()
-    conn.close()
+# ==================== Работа с серверным конфигом ====================
+def get_server_config():
+    if not os.path.exists(SERVER_CONF):
+        raise RuntimeError("Файл сервера не найден. Создайте его во вкладке 'Сервер'.")
     
-    used_ips = {ip for (ip,) in rows}
-    used_ips.add(str(server_ip)) 
+    with open(SERVER_CONF, "r") as f:
+        content = f.read()
+
+    m_priv = re.search(r"^PrivateKey\s*=\s*(\S+)", content, re.MULTILINE)
+    if not m_priv:
+        raise RuntimeError("В конфиге сервера не найден PrivateKey")
     
-    for ip in network.hosts():
-        ip_str = str(ip)
-        if ip_str not in used_ips:
-            return ip_str
-    raise RuntimeError("Свободные IP в подсети закончились")
+    m_port = re.search(r"^ListenPort\s*=\s*(\d+)", content, re.MULTILINE)
+    port = m_port.group(1) if m_port else "51820"
 
-def add_peer_to_live(pub_key, allowed_ip):
-    run_cmd(["awg", "set", INTERFACE, "peer", pub_key, "allowed-ips", f"{allowed_ip}/32"])
+    m_addr = re.search(r"^Address\s*=\s*(\S+)", content, re.MULTILINE)
+    if not m_addr:
+        raise RuntimeError("В конфиге сервера не найден Address")
+    
+    server_ip_str = m_addr.group(1).split('/')[0]
+    server_ip = ipaddress.ip_address(server_ip_str)
+    network = ipaddress.ip_network(f"{server_ip_str}/24", strict=False)
 
-def remove_peer_from_live(pub_key):
-    run_cmd(["awg", "set", INTERFACE, "peer", pub_key, "remove"], check=False)
+    m_mtu = re.search(r"^MTU\s*=\s*(\d+)", content, re.MULTILINE)
+    mtu = m_mtu.group(1) if m_mtu else DEFAULT_MTU
+
+    m_keepalive = re.search(r"^PersistentKeepalive\s*=\s*(\d+)", content, re.MULTILINE)
+    keepalive = m_keepalive.group(1) if m_keepalive else DEFAULT_KEEPALIVE
+
+    obfuscation = {}
+    for param in ["Jc", "Jmin", "Jmax", "S1", "S2", "S3", "S4", "H1", "H2", "H3", "H4"]:
+        m = re.search(rf"^{param}\s*=\s*(\d+)", content, re.MULTILINE)
+        if m:
+            obfuscation[param] = m.group(1)
+
+    return {
+        "pub_key": "", "port": port, "network": network,
+        "server_ip": server_ip, "mtu": mtu, "keepalive": keepalive,
+        "obfuscation": obfuscation
+    }
 
 # ==================== Фоновая очистка ====================
 def cleanup_worker():
@@ -191,9 +103,6 @@ def cleanup_worker():
             now = datetime.now().isoformat()
             expired = conn.execute("SELECT name, pub_key FROM clients WHERE expire_at < ?", (now,)).fetchall()
             for name, pub in expired:
-                remove_peer_from_live(pub)
-                remove_peer_from_conf(pub) # Удаляем из файла сервера!
-                
                 conn.execute("DELETE FROM clients WHERE name = ?", (name,))
                 conf_path = os.path.join(CONFIGS_DIR, f"{name}.conf")
                 qr_path = os.path.join(QR_DIR, f"{name}.png")
@@ -211,14 +120,74 @@ def cleanup_worker():
 def index():
     return render_template("index.html")
 
+@app.route("/api/server/generate", methods=["POST"])
+@requires_auth
+def api_server_generate():
+    data = request.get_json()
+    network = data.get("network", "10.9.9.0/24")
+    port = data.get("port", "54443")
+    
+    try:
+        # 1. Генерируем ключи
+        priv, pub = gen_keypair()
+        
+        # 2. Генерируем параметры обфускации
+        jc = secrets.randbelow(5) + 3  # 3-7
+        jmin = secrets.randbelow(100) + 50
+        jmax = secrets.randbelow(500) + 200
+        s1 = secrets.randbelow(50) + 10
+        s2 = s1 + 56  # Чтобы не было конфликта
+        s3 = secrets.randbelow(30) + 10
+        s4 = secrets.randbelow(30) + 5
+        h1 = secrets.randbelow(2000000000) + 5
+        h2 = secrets.randbelow(2000000000) + 5
+        h3 = secrets.randbelow(2000000000) + 5
+        h4 = secrets.randbelow(2000000000) + 5
+
+        # 3. Формируем конфиг
+        config = f"""[Interface]
+PrivateKey = {priv}
+Address = {network.split('/')[0].rsplit('.', 1)[0]}.1/24
+ListenPort = {port}
+MTU = 1280
+
+Jc = {jc}
+Jmin = {jmin}
+Jmax = {jmax}
+S1 = {s1}
+S2 = {s2}
+S3 = {s3}
+S4 = {s4}
+H1 = {h1}
+H2 = {h2}
+H3 = {h3}
+H4 = {h4}
+
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
+"""
+        
+        # 4. Записываем в файл (в папку, примонтированную из контейнера)
+        os.makedirs(os.path.dirname(SERVER_CONF), exist_ok=True)
+        with open(SERVER_CONF, "w") as f:
+            f.write(config)
+        
+        return jsonify({"ok": True, "message": "Сервер создан"})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)}), 500
+
 @app.route("/api/server/status")
 @requires_auth
 def api_server_status():
     try:
         cfg = get_server_config()
         return jsonify({
-            "status": "running", "ip": SERVER_IP, "port": cfg["port"],
-            "network": str(cfg["network"]), "mtu": cfg["mtu"], "keepalive": cfg["keepalive"]
+            "status": "running", 
+            "ip": os.environ.get("AWG_SERVER_IP", "не определен"),
+            "port": cfg["port"],
+            "network": str(cfg["network"]),
+            "mtu": cfg["mtu"],
+            "keepalive": cfg["keepalive"]
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -229,29 +198,7 @@ def api_clients():
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute("SELECT name, pub_key, ip, expire_at FROM clients ORDER BY name").fetchall()
     conn.close()
-
-    stats_map = {}
-    try:
-        dump = run_cmd(["awg", "show", INTERFACE, "dump"], check=False)
-        for line in dump.strip().split("\n")[1:]:
-            parts = line.split("\t")
-            if len(parts) >= 8:
-                stats_map[parts[0]] = {
-                    "rx": int(parts[5]) if parts[5].isdigit() else 0,
-                    "tx": int(parts[6]) if parts[6].isdigit() else 0,
-                    "handshake": int(parts[4]) if parts[4].isdigit() else 0,
-                }
-    except Exception:
-        pass
-
-    result = []
-    for name, pub, ip, expire_at in rows:
-        s = stats_map.get(pub, {"rx": 0, "tx": 0, "handshake": 0})
-        result.append({
-            "name": name, "ip": ip, "expire_at": expire_at,
-            "rx": s["rx"], "tx": s["tx"], "last_handshake": s["handshake"],
-        })
-    return jsonify(result)
+    return jsonify([{"name": r[0], "ip": r[2], "expire_at": r[3]} for r in rows])
 
 @app.route("/api/clients", methods=["POST"])
 @requires_auth
@@ -263,33 +210,38 @@ def api_client_add():
     if not name or days <= 0:
         return jsonify({"ok": False, "message": "Укажите имя и дни (>0)"}), 400
 
-    conn = sqlite3.connect(DB_PATH)
     try:
-        if conn.execute("SELECT 1 FROM clients WHERE name = ?", (name,)).fetchone():
-            return jsonify({"ok": False, "message": "Имя уже существует"}), 400
-
         cfg = get_server_config()
         priv, pub = gen_keypair()
-        client_ip = next_client_ip(cfg["network"], cfg["server_ip"])
+        
+        # Упрощенный расчет IP (в реальности нужно проверять занятость)
+        client_ip = f"{str(cfg['network']).split('/')[0].rsplit('.', 1)[0]}.2"
 
-        # 1. Добавляем в память ядра (чтобы работало сразу)
-        add_peer_to_live(pub, client_ip)
-        # 2. Дописываем в файл сервера (чтобы выжило после перезагрузки)
-        append_peer_to_conf(pub, client_ip)
+        # Читаем текущий конфиг и добавляем пира
+        with open(SERVER_CONF, "r") as f:
+            content = f.read()
+        
+        new_peer = f"""
+[Peer]
+PublicKey = {pub}
+AllowedIPs = {client_ip}/32
+"""
+        with open(SERVER_CONF, "a") as f:
+            f.write(new_peer)
 
-        obf_lines = "\n".join([f"{k} = {v}" for k, v in cfg["obfuscation"].items()])
+        # Формируем клиентский конфиг
+        srv_pub = run_cmd(["awg", "pubkey"], input_data=cfg.get("priv", "")).strip() if cfg.get("priv") else "КЛЮЧ_НЕ_НАЙДЕН"
+        
         config_text = f"""[Interface]
 PrivateKey = {priv}
 Address = {client_ip}/32
 MTU = {cfg["mtu"]}
 DNS = 8.8.8.8
-{obf_lines}
 
 [Peer]
-PublicKey = {cfg["pub_key"]}
-Endpoint = {SERVER_IP}:{cfg["port"]}
+PublicKey = {srv_pub}
+Endpoint = {os.environ.get("AWG_SERVER_IP", "IP_СЕРВЕРА")}:{cfg["port"]}
 AllowedIPs = 0.0.0.0/0
-PersistentKeepalive = {cfg["keepalive"]}
 """
         
         conf_path = os.path.join(CONFIGS_DIR, f"{name}.conf")
@@ -299,19 +251,15 @@ PersistentKeepalive = {cfg["keepalive"]}
         qr_path = os.path.join(QR_DIR, f"{name}.png")
         subprocess.run(["qrencode", "-o", qr_path, "-t", "PNG"], input=config_text.encode(), check=True)
 
+        conn = sqlite3.connect(DB_PATH)
         expire_at = (datetime.now() + timedelta(days=days)).isoformat()
-        conn.execute(
-            "INSERT INTO clients (name, pub_key, ip, expire_at, created_at) VALUES (?,?,?,?,?)",
-            (name, pub, client_ip, expire_at, datetime.now().isoformat()),
-        )
+        conn.execute("INSERT INTO clients (name, pub_key, ip, expire_at) VALUES (?,?,?,?)", (name, pub, client_ip, expire_at))
         conn.commit()
+        conn.close()
 
         return jsonify({"ok": True, "message": "Клиент создан"})
     except Exception as e:
-        conn.rollback()
         return jsonify({"ok": False, "message": str(e)}), 500
-    finally:
-        conn.close()
 
 @app.route("/api/clients/<name>/config")
 @requires_auth
@@ -328,80 +276,6 @@ def api_client_qr(name):
     if os.path.exists(qr_path):
         return send_file(qr_path, mimetype='image/png')
     return "QR-код не найден", 404
-
-# ==================== Аудит системы ====================
-@app.route("/api/system/audit")
-@requires_auth
-def api_system_audit():
-    kernel_peers = set()
-    try:
-        dump = run_cmd(["awg", "show", INTERFACE, "dump"], check=False)
-        for line in dump.strip().split("\n")[1:]:
-            parts = line.split("\t")
-            if len(parts) > 0 and parts[0]:
-                kernel_peers.add(parts[0])
-    except Exception:
-        pass
-
-    conn = sqlite3.connect(DB_PATH)
-    db_clients = {row[1]: {"name": row[0], "ip": row[2]} for row in conn.execute("SELECT name, pub_key, ip FROM clients").fetchall()}
-    conn.close()
-
-    missing_in_kernel = []
-    orphaned_in_kernel = []
-    missing_files = []
-
-    for pub_key, info in db_clients.items():
-        if pub_key not in kernel_peers:
-            missing_in_kernel.append({"name": info["name"], "pub_key": pub_key, "ip": info["ip"]})
-        
-        conf_path = os.path.join(CONFIGS_DIR, f"{info['name']}.conf")
-        if not os.path.exists(conf_path):
-            missing_files.append(info["name"])
-
-    for pub_key in kernel_peers:
-        if pub_key not in db_clients:
-            orphaned_in_kernel.append({"pub_key": pub_key})
-
-    return jsonify({
-        "missing_in_kernel": missing_in_kernel,
-        "orphaned_in_kernel": orphaned_in_kernel,
-        "missing_files": missing_files
-    })
-
-@app.route("/api/system/audit/clean", methods=["POST"])
-@requires_auth
-def api_system_audit_clean():
-    data = request.get_json()
-    action = data.get("action")
-    pub_key = data.get("pub_key")
-    name = data.get("name")
-
-    try:
-        if action == "remove_orphan" and pub_key:
-            remove_peer_from_live(pub_key)
-            remove_peer_from_conf(pub_key) # Удаляем и из файла
-            return jsonify({"ok": True, "message": "Фантомный пир удален"})
-
-        elif action == "remove_broken" and name and pub_key:
-            remove_peer_from_live(pub_key)
-            remove_peer_from_conf(pub_key) # Удаляем и из файла
-            
-            conn = sqlite3.connect(DB_PATH)
-            conn.execute("DELETE FROM clients WHERE name = ?", (name,))
-            conn.commit()
-            conn.close()
-            
-            conf_path = os.path.join(CONFIGS_DIR, f"{name}.conf")
-            qr_path = os.path.join(QR_DIR, f"{name}.png")
-            if os.path.exists(conf_path): os.remove(conf_path)
-            if os.path.exists(qr_path): os.remove(qr_path)
-            
-            return jsonify({"ok": True, "message": "Битая запись удалена"})
-            
-        return jsonify({"ok": False, "message": "Неизвестное действие"}), 400
-    except Exception as e:
-        return jsonify({"ok": False, "message": str(e)}), 500
 
 if __name__ == "__main__":
     init_db()
