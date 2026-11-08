@@ -20,4 +20,4 @@ COPY index.html /opt/awg-panel/templates/index.html
 EXPOSE 2020
 
 # Запускаем панель (она сама запустит awg через subprocess)
-CMD ["python3", "/opt/awg-panel/app.py"]
+CMD ["/opt/venv/bin/python3", "/opt/awg-panel/app.py"]
