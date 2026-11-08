@@ -1,7 +1,9 @@
 FROM vnxme/amneziawg-go:latest
 
-# Устанавливаем только python3 и pip, без venv
-RUN apk add --no-cache python3 py3-pip qrencode curl
+# Автоматически определяем версию Alpine и подключаем репозиторий community
+RUN echo "https://dl-cdn.alpinelinux.org/alpine/v$(cut -d. -f1,2 /etc/alpine-release)/community" >> /etc/apk/repositories \
+    && apk update \
+    && apk add --no-cache python3 py3-pip qrencode curl
 
 # Ставим Flask напрямую, обходя защиту PEP 668
 RUN pip3 install --no-cache-dir --break-system-packages flask
