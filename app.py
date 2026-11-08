@@ -27,6 +27,21 @@ app = Flask(__name__)
 os.makedirs(CONFIGS_DIR, exist_ok=True)
 os.makedirs(QR_DIR, exist_ok=True)
 
+# ==================== БАЗА ДАННЫХ (ДОБАВИТЬ ЭТО) ====================
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS clients (
+            name TEXT PRIMARY KEY,
+            pub_key TEXT NOT NULL,
+            ip TEXT NOT NULL,
+            expire_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
 # ==================== Утилиты ====================
 def check_auth(username, password):
     return username == AUTH_USER and password == AUTH_PASS
