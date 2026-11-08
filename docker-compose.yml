@@ -7,6 +7,8 @@ services:
     restart: unless-stopped
     networks:
       - webgateway  # Оставляем эту сеть для обратного прокси
+    ports:
+      - "2020:2020"
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
