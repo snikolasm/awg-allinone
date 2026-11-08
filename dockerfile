@@ -2,7 +2,8 @@
 FROM ghcr.io/ayastrebov/docker-amneziawg:latest
 
 # Устанавливаем Python и зависимости для панели
-RUN apk add --no-cache python3 qrencode curl \
+RUN echo "http://dl-cdn.alpinelinux.org/alpine/edge/community" >> /etc/apk/repositories && \
+    apk add --no-cache python3 py3-pip qrencode curl \
     && python3 -m ensurepip \
     && pip3 install --no-cache --upgrade pip setuptools
 
