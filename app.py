@@ -27,7 +27,7 @@ app = Flask(__name__)
 os.makedirs(CONFIGS_DIR, exist_ok=True)
 os.makedirs(QR_DIR, exist_ok=True)
 
-# ==================== БАЗА ДАННЫХ (ДОБАВИТЬ ЭТО) ====================
+# ==================== БАЗА ДАННЫХ ====================
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
@@ -42,7 +42,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ==================== Утилиты ====================
+# ==================== УТИЛИТЫ ====================
 def check_auth(username, password):
     return username == AUTH_USER and password == AUTH_PASS
 
@@ -58,8 +58,8 @@ def requires_auth(f):
         return f(*args, **kwargs)
     return decorated
 
-def run_cmd(cmd, check=True, input_data=None):
-    result = subprocess.run(cmd, capture_output=True, text=True, input=input_data)
+def run_cmd(cmd, check=True, input_data=None, shell=False):
+    result = subprocess.run(cmd, capture_output=True, text=True, input=input_data, shell=shell)
     if check and result.returncode != 0:
         raise RuntimeError(f"Команда не удалась: {cmd}\n{result.stderr}")
     return result.stdout
@@ -69,7 +69,37 @@ def gen_keypair():
     pub = run_cmd(["awg", "pubkey"], input_data=priv).strip()
     return priv, pub
 
-# ==================== Работа с серверным конфигом ====================
+def setup_firewall(port):
+    """Автоматическая настройка UFW (внутри контейнера или через nsenter)"""
+    print(f"[*] Попытка настройки файрвола для порта {port}/udp...")
+    
+    # Проверяем, запущены ли мы в контейнере и есть ли nsenter
+    # Если панель работает в network_mode: host, ufw может быть доступен напрямую
+    
+    cmd_ufw_status = ["ufw", "status"]
+    try:
+        # Проверяем статус UFW
+        status_out = run_cmd(cmd_ufw_status, check=False)
+        if "Status: inactive" in status_out:
+            print("[*] UFW неактивен. Включаем...")
+            run_cmd(["ufw", "allow", "ssh"], check=False) # Не теряем SSH
+            run_cmd(["ufw", "--force", "enable"], check=False)
+        
+        # Добавляем правило, если его нет
+        rules = run_cmd(["ufw", "status"], check=False)
+        if f"{port}/udp" not in rules:
+            print(f"[*] Добавляем правило UFW для порта {port}/udp")
+            run_cmd(["ufw", "allow", f"{port}/udp"], check=False)
+            print("[+] Правило успешно добавлено.")
+        else:
+            print(f"[+] Правило для порта {port}/udp уже существует.")
+            
+    except FileNotFoundError:
+        print("[!] UFW не найден внутри контейнера. Пропускаем настройку файрвола.")
+    except Exception as e:
+        print(f"[!] Ошибка при настройке UFW: {e}")
+
+# ==================== РАБОТА С КОНФИГОМ ====================
 def get_server_config():
     if not os.path.exists(SERVER_CONF):
         raise RuntimeError("Файл сервера не найден. Создайте его во вкладке 'Сервер'.")
@@ -77,10 +107,6 @@ def get_server_config():
     with open(SERVER_CONF, "r") as f:
         content = f.read()
 
-    m_priv = re.search(r"^PrivateKey\s*=\s*(\S+)", content, re.MULTILINE)
-    if not m_priv:
-        raise RuntimeError("В конфиге сервера не найден PrivateKey")
-    
     m_port = re.search(r"^ListenPort\s*=\s*(\d+)", content, re.MULTILINE)
     port = m_port.group(1) if m_port else "51820"
 
@@ -105,12 +131,12 @@ def get_server_config():
             obfuscation[param] = m.group(1)
 
     return {
-        "pub_key": "", "port": port, "network": network,
+        "port": port, "network": network,
         "server_ip": server_ip, "mtu": mtu, "keepalive": keepalive,
         "obfuscation": obfuscation
     }
 
-# ==================== Фоновая очистка ====================
+# ==================== ФОНОВАЯ ОЧИСТКА ====================
 def cleanup_worker():
     while True:
         try:
@@ -129,7 +155,7 @@ def cleanup_worker():
             print(f"[!] Ошибка очистки: {e}")
         time.sleep(3600)
 
-# ==================== Маршруты ====================
+# ==================== МАРШРУТЫ ====================
 @app.route("/")
 @requires_auth
 def index():
@@ -143,15 +169,18 @@ def api_server_generate():
     port = data.get("port", "54443")
     
     try:
-        # 1. Генерируем ключи
+        # 1. Открываем порт в файрволе
+        setup_firewall(port)
+
+        # 2. Генерируем ключи
         priv, pub = gen_keypair()
         
-        # 2. Генерируем параметры обфускации
-        jc = secrets.randbelow(5) + 3  # 3-7
+        # 3. Генерируем параметры обфускации
+        jc = secrets.randbelow(5) + 3
         jmin = secrets.randbelow(100) + 50
         jmax = secrets.randbelow(500) + 200
         s1 = secrets.randbelow(50) + 10
-        s2 = s1 + 56  # Чтобы не было конфликта
+        s2 = s1 + 56
         s3 = secrets.randbelow(30) + 10
         s4 = secrets.randbelow(30) + 5
         h1 = secrets.randbelow(2000000000) + 5
@@ -159,7 +188,7 @@ def api_server_generate():
         h3 = secrets.randbelow(2000000000) + 5
         h4 = secrets.randbelow(2000000000) + 5
 
-        # 3. Формируем конфиг
+        # 4. Формируем конфиг
         config = f"""[Interface]
 PrivateKey = {priv}
 Address = {network.split('/')[0].rsplit('.', 1)[0]}.1/24
@@ -182,12 +211,12 @@ PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -t nat -A POSTROUTING -o 
 PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
 """
         
-        # 4. Записываем в файл (в папку, примонтированную из контейнера)
+        # 5. Записываем в файл
         os.makedirs(os.path.dirname(SERVER_CONF), exist_ok=True)
         with open(SERVER_CONF, "w") as f:
             f.write(config)
         
-        return jsonify({"ok": True, "message": "Сервер создан"})
+        return jsonify({"ok": True, "message": f"Сервер создан, порт {port}/udp открыт."})
     except Exception as e:
         return jsonify({"ok": False, "message": str(e)}), 500
 
@@ -201,8 +230,6 @@ def api_server_status():
             "ip": os.environ.get("AWG_SERVER_IP", "не определен"),
             "port": cfg["port"],
             "network": str(cfg["network"]),
-            "mtu": cfg["mtu"],
-            "keepalive": cfg["keepalive"]
         })
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -228,11 +255,8 @@ def api_client_add():
     try:
         cfg = get_server_config()
         priv, pub = gen_keypair()
-        
-        # Упрощенный расчет IP (в реальности нужно проверять занятость)
         client_ip = f"{str(cfg['network']).split('/')[0].rsplit('.', 1)[0]}.2"
 
-        # Читаем текущий конфиг и добавляем пира
         with open(SERVER_CONF, "r") as f:
             content = f.read()
         
@@ -244,8 +268,9 @@ AllowedIPs = {client_ip}/32
         with open(SERVER_CONF, "a") as f:
             f.write(new_peer)
 
-        # Формируем клиентский конфиг
-        srv_pub = run_cmd(["awg", "pubkey"], input_data=cfg.get("priv", "")).strip() if cfg.get("priv") else "КЛЮЧ_НЕ_НАЙДЕН"
+        # Получаем публичный ключ сервера из конфига
+        m = re.search(r"^PrivateKey\s*=\s*(\S+)", content, re.MULTILINE)
+        srv_pub = run_cmd(["awg", "pubkey"], input_data=m.group(1)).strip() if m else "КЛЮЧ_НЕ_НАЙДЕН"
         
         config_text = f"""[Interface]
 PrivateKey = {priv}
