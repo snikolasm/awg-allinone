@@ -406,4 +406,4 @@ def api_system_audit_clean():
 if __name__ == "__main__":
     init_db()
     threading.Thread(target=cleanup_worker, daemon=True).start()
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    app.run(host="0.0.0.0", port=2020, debug=False)
