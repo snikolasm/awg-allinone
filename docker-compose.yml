@@ -12,7 +12,7 @@ services:
     networks:
       lan_macvlan:
         # Здесь можно задать статический IP для панели (опционально)
-        ipv4_address: 192.168.1.245 
+        # ipv4_address: 192.168.1.245 
     
     cap_add:
       - NET_ADMIN
