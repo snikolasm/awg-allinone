@@ -2,17 +2,14 @@ FROM debian:13-slim
 
 # Устанавливаем Python, Go, утилиты и amneziawg-tools
 RUN apt-get update && apt-get install -y \
+    curl \
+    gnupg \
     python3 \
     python3-pip \
     python3-venv \
     qrencode \
-    curl \
-    git \
-    golang-go \
-    build-essential \
     iproute2 \
     iptables \
-    wireguard-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Создаем виртуальное окружение и ставим Flask
