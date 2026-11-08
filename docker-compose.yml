@@ -5,21 +5,18 @@ services:
     build: .
     container_name: awg-allinone
     restart: unless-stopped
-    networks:
-      - webgateway  # Оставляем эту сеть для обратного прокси
-    ports:
-      - "2020:2020"
+    # Используем сеть хоста для доступа к интерфейсам и файрволу
+    network_mode: host 
+    #pid: host # Раскомментируйте, если хотите использовать nsenter для ufw
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
+      - NET_RAW
     devices:
       - /dev/net/tun:/dev/net/tun
-    # Удалите sysctls, они конфликтуют с непривилегированным режимом
     volumes:
       - ./configs:/opt/awg-panel/configs
       - ./qr:/opt/awg-panel/qr
       - ./server-data:/etc/amnezia/amneziawg
-
-networks:
-  webgateway:
-    external: true
+      # Пробрасываем сокет Docker, если нужно управлять контейнерами
+      # - /var/run/docker.sock:/var/run/docker.sock 
