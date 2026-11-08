@@ -2,9 +2,8 @@
 FROM ghcr.io/ayastrebov/docker-amneziawg:latest
 
 # Устанавливаем Python и зависимости для панели
-RUN sed -i 's|^#\(.*/community\)|\1|' /etc/apk/repositories \
-    && apk update \
-    && apk add --no-cache python3 py3-pip qrencode curl \
+RUN apk add --no-cache python3 qrencode curl \
+    && python3 -m ensurepip --upgrade \
     && pip3 install --no-cache --upgrade pip setuptools --break-system-packages
 
 # Устанавливаем Flask
