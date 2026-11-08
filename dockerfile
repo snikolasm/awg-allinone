@@ -5,7 +5,7 @@ FROM ghcr.io/ayastrebov/docker-amneziawg:latest
 RUN apk add --no-cache python3 py3-pip qrencode curl
 
 # Устанавливаем Flask
-RUN pip3 install flask
+RUN pip3 install flask --break-system-packages
 
 # Создаем папки для панели
 RUN mkdir -p /opt/awg-panel/configs /opt/awg-panel/qr /opt/awg-panel/templates
